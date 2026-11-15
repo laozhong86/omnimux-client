@@ -52,6 +52,9 @@ const MATERIAL_OUTPUT_OPTIONS: Record<MaterialType, MaterialOutputOption[]> = {
     { targetMaterialType: 'audio', targetTool: 'voice-clone', icon: 'Mic' },
     { targetMaterialType: 'text', targetTool: 'audio-transcription', icon: 'TextGen' },
   ],
+  document: [
+    { targetMaterialType: 'video', targetTool: 'video-generation', icon: 'VideoGen' },
+  ],
 };
 
 export function getOutputOptionsForMaterialNode(materialType: MaterialType): MaterialOutputOption[] {
@@ -152,6 +155,15 @@ export function isNodeConnectionValid(
 
   if (!sourceInfo.materialType) {
     return true;
+  }
+
+  // JSON documents are prompt/parameter inputs for video-generation nodes only;
+  // a text node's tool union also advertises video, so match the target tool
+  // (or its default video tool) instead of the accepted-type union.
+  if (sourceInfo.materialType === 'document') {
+    const targetMaterialType = targetNode.data?.materialType;
+    const targetTool = targetNode.data?.selectedTool;
+    return targetMaterialType === 'video' && (targetTool === undefined || targetTool === 'video-generation');
   }
 
   return targetRequirements.acceptedTypes.includes(sourceInfo.materialType);

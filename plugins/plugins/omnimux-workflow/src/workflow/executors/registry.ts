@@ -74,7 +74,7 @@ export interface ExecutionContext {
 
 export interface NodeOutput {
   mediaAssets?: Array<{
-    type: 'image' | 'video' | 'audio';
+    type: 'image' | 'video' | 'audio' | 'document';
     url: string;
     path?: string;
     thumbnail?: string;
@@ -85,6 +85,10 @@ export interface NodeOutput {
     durationSec?: number;
   }>;
   text?: string;
+  /** Raw JSON document text (Issue #27). */
+  documentText?: string;
+  /** Explicit JSON document read/parse error (Issue #27). */
+  documentError?: string;
   realPath?: string;
   relativePath?: string;
   assetId?: string;
