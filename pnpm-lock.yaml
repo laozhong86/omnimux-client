@@ -252,7 +252,7 @@ importers:
         specifier: '>=0.1.0-rc.6 || >=0.2.1-rc.3 <0.3.0-0'
         version: 0.2.1-rc.3(@deepseek-ai/cordis@4.0.2)
       dsh-ui-kit:
-        specifier: file:../../packages/dsh-ui-kit
+        specifier: ^0.1.0
         version: link:../../packages/dsh-ui-kit
       react:
         specifier: ^18.2.0
@@ -271,7 +271,7 @@ importers:
         specifier: '>=0.1.0-rc.6 || >=0.2.1-rc.3 <0.3.0-0'
         version: 0.2.1-rc.3(@deepseek-ai/cordis@4.0.2)
       dsh-ui-kit:
-        specifier: file:../../packages/dsh-ui-kit
+        specifier: ^0.1.0
         version: link:../../packages/dsh-ui-kit
       react:
         specifier: ^18.2.0
@@ -290,10 +290,10 @@ importers:
         specifier: '>=0.1.0-rc.6 || >=0.2.1-rc.3 <0.3.0-0'
         version: 0.2.1-rc.3(@deepseek-ai/cordis@4.0.2)
       dsh-ui-kit:
-        specifier: file:../../packages/dsh-ui-kit
+        specifier: ^0.1.0
         version: link:../../packages/dsh-ui-kit
       omnimux-products:
-        specifier: file:../omnimux-products
+        specifier: ^0.1.2
         version: link:../omnimux-products
       react:
         specifier: ^18.2.0
@@ -378,7 +378,7 @@ importers:
         specifier: ^2.1.1
         version: 2.1.1
       dsh-ui-kit:
-        specifier: file:../../packages/dsh-ui-kit
+        specifier: ^0.1.0
         version: link:../../packages/dsh-ui-kit
       framer-motion:
         specifier: ^12.0.0
@@ -454,7 +454,7 @@ importers:
         specifier: file:../../packages/form-contract
         version: link:../../packages/form-contract
       dsh-ui-kit:
-        specifier: file:../../packages/dsh-ui-kit
+        specifier: ^0.1.0
         version: link:../../packages/dsh-ui-kit
       esbuild:
         specifier: ^0.25.0
@@ -475,7 +475,7 @@ importers:
         specifier: '>=0.1.0-rc.6 || >=0.2.1-rc.3 <0.3.0-0'
         version: 0.2.1-rc.3(@deepseek-ai/cordis@4.0.2)
       dsh-ui-kit:
-        specifier: file:../../packages/dsh-ui-kit
+        specifier: ^0.1.0
         version: link:../../packages/dsh-ui-kit
       lucide-react:
         specifier: ^1.33.0
@@ -503,7 +503,7 @@ importers:
         specifier: 1.0.0
         version: 1.0.0
       dsh-ui-kit:
-        specifier: file:../../packages/dsh-ui-kit
+        specifier: ^0.1.0
         version: link:../../packages/dsh-ui-kit
       yaml:
         specifier: 2.9.0
@@ -549,7 +549,7 @@ importers:
         specifier: '>=0.1.0-rc.6 || >=0.2.1-rc.3 <0.3.0-0'
         version: 0.2.1-rc.3(@deepseek-ai/cordis@4.0.2)
       dsh-ui-kit:
-        specifier: file:../../packages/dsh-ui-kit
+        specifier: ^0.1.0
         version: link:../../packages/dsh-ui-kit
       react:
         specifier: ^18.2.0
@@ -565,7 +565,7 @@ importers:
   plugins/plugins/omnimux-publish:
     dependencies:
       dsh-ui-kit:
-        specifier: file:../../packages/dsh-ui-kit
+        specifier: ^0.1.0
         version: link:../../packages/dsh-ui-kit
     devDependencies:
       '@deepseek-ai/dsh-client-ui-primitives':
@@ -625,7 +625,7 @@ importers:
         specifier: 12.11.3
         version: 12.11.3(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(immer@11.2.9)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       dsh-ui-kit:
-        specifier: file:../../packages/dsh-ui-kit
+        specifier: ^0.1.0
         version: link:../../packages/dsh-ui-kit
       lucide-react:
         specifier: 1.33.0
