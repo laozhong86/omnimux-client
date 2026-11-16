@@ -37,9 +37,11 @@ import {
   isLiveExecutionStatus,
   LOCAL_RUN_ID,
   type ExecutionUiStatus,
+  type NodeSubmissionResult,
 } from '../store/executionStore';
 import { t } from '../i18n';
-import { signatureOf } from '../bridge/persistSanitize';
+import { sanitizeEdges, sanitizeNodes, signatureOf } from '../bridge/persistSanitize';
+import type { SerializedCanvasEdge, SerializedCanvasNode } from '../../shared/canvasTypes';
 import {
   buildNodeProgressPatch,
   progressClearPatch,
@@ -502,6 +504,8 @@ export interface ExecutionControllerOptions {
   onBeforeStart?: () => Promise<number | void> | number | void;
   /** Called once when a group run reaches a terminal state. */
   onRunTerminal?: (info: ExecutionRunTerminalInfo) => void;
+  /** Background save-barrier failure during an immediate single-node submit. */
+  onPreflightError?: (message: string) => void;
 }
 
 export interface ExecutionController {
@@ -510,7 +514,9 @@ export interface ExecutionController {
     nodeIds?: string[];
     groupId?: string;
     graphHash?: string;
-  }) => Promise<void>;
+    /** Single-node submit: start the create request without waiting for the save barrier. */
+    immediate?: boolean;
+  }) => Promise<NodeSubmissionResult>;
   pause: () => Promise<void>;
   resume: () => Promise<void>;
   cancel: () => Promise<void>;
@@ -553,6 +559,8 @@ export function useExecutionController(
   workspaceIdRef.current = workspaceId;
   const onBeforeStartRef = useRef(opts?.onBeforeStart);
   onBeforeStartRef.current = opts?.onBeforeStart;
+  const onPreflightErrorRef = useRef(opts?.onPreflightError);
+  onPreflightErrorRef.current = opts?.onPreflightError;
   const onRunTerminalRef = useRef(opts?.onRunTerminal);
   onRunTerminalRef.current = opts?.onRunTerminal;
   /** executionId -> group metadata needed by the publish gate. */
@@ -672,11 +680,12 @@ export function useExecutionController(
   }, []);
 
   const startExecution = useCallback(
-    async (opts: { mode?: 'full' | 'subset' | 'single'; nodeIds?: string[]; groupId?: string; graphHash?: string } = {}) => {
+    async (opts: { mode?: 'full' | 'subset' | 'single'; nodeIds?: string[]; groupId?: string; graphHash?: string; immediate?: boolean } = {}): Promise<NodeSubmissionResult> => {
       const workspace = workspaceIdRef.current;
-      if (!workspace) return;
+      const submitError = (error: string): NodeSubmissionResult => ({ ok: false, error });
+      if (!workspace) return submitError(t('error.createExecutionFailed'));
       if (opts.mode === 'full') {
-        throw new Error('创作画布不支持全画布一键运行，请选择指定节点执行');
+        return submitError('创作画布不支持全画布一键运行，请选择指定节点执行');
       }
       // #2255: a submit is no longer refused while another run is live. Only a
       // repeat of the *same* submission is guarded, so double-clicking one node
@@ -684,14 +693,33 @@ export function useExecutionController(
       // Ids are sorted and NUL-joined: `['a','b']` and `['b','a']` are the same
       // node set, and a comma inside an id must not forge another key.
       const submissionKey = `${opts.mode ?? 'full'}:${[...(opts.nodeIds ?? [])].sort().join('\u0000')}`;
-      if (startingRef.current.has(submissionKey)) return;
+      if (startingRef.current.has(submissionKey)) return submitError('');
       startingRef.current.add(submissionKey);
       const generation = generationRef.current;
       const graph = useCanvasStore.getState();
       const signature = signatureOf(graph.nodes, graph.edges, { workspaceId: workspace });
+      // Single-node submit carries the current graph in the create request, so
+      // it does not depend on the save barrier or its version. Group / subset
+      // runs keep the old preflight and expectedVersion contract.
+      const graphSnapshot = opts.immediate
+        ? {
+            nodes: sanitizeNodes(graph.nodes as unknown as SerializedCanvasNode[], { workspaceId: workspace }),
+            edges: sanitizeEdges(graph.edges as unknown as SerializedCanvasEdge[]),
+          }
+        : undefined;
       try {
-        const expectedVersion = await onBeforeStartRef.current?.();
-        if (!mountedRef.current || workspaceIdRef.current !== workspace) return;
+        const preflight = onBeforeStartRef.current?.();
+        let expectedVersion: number | void = undefined;
+        if (opts.immediate) {
+          // The graph snapshot is the execution source, but the background save
+          // still runs; a save failure must be visible rather than swallowed.
+          void Promise.resolve(preflight).catch((error) => {
+            onPreflightErrorRef.current?.(error instanceof Error ? error.message : t('error.createExecutionFailed'));
+          });
+        } else {
+          expectedVersion = await preflight;
+        }
+        if (!mountedRef.current || workspaceIdRef.current !== workspace) return submitError('');
         const current = useCanvasStore.getState();
         if (signatureOf(current.nodes, current.edges, { workspaceId: workspace }) !== signature) {
           throw new Error('保存期间输入已变化，请确认内容后重新生成');
@@ -701,10 +729,11 @@ export function useExecutionController(
           nodeIds: opts.nodeIds,
           ...(opts.groupId ? { groupId: opts.groupId } : {}),
           ...(opts.graphHash ? { graphHash: opts.graphHash } : {}),
+          ...(graphSnapshot ? { graph: graphSnapshot } : {}),
           ...(typeof expectedVersion === 'number' ? { expectedVersion } : {}),
         });
-        if (!mountedRef.current || workspaceIdRef.current !== workspace) return;
-        if (generationRef.current !== generation) return;
+        if (!mountedRef.current || workspaceIdRef.current !== workspace) return submitError('');
+        if (generationRef.current !== generation) return submitError('');
         if (!result.ok || !result.body.execution) {
           throw new Error(result.body.error === 'project-required'
             ? t('error.projectRequired')
@@ -724,15 +753,18 @@ export function useExecutionController(
           });
         }
         subscribe(result.body.execution.id);
+        return { ok: true };
       } catch (error) {
-        if (!mountedRef.current || workspaceIdRef.current !== workspace) return;
+        if (!mountedRef.current || workspaceIdRef.current !== workspace) return submitError('');
+        const message = error instanceof Error ? error.message : t('error.createExecutionFailed');
         // A rejected submit belongs to the canvas, not to any live run: writing
         // it onto the focused run would flip a healthy run to `error`.
         useExecutionStore.getState().setExecution({
           executionId: LOCAL_RUN_ID,
           status: 'error',
-          error: error instanceof Error ? error.message : t('error.createExecutionFailed'),
+          error: message,
         });
+        return submitError(message);
       } finally {
         startingRef.current.delete(submissionKey);
       }
@@ -826,9 +858,11 @@ export function useExecutionController(
   // Single-node execution bridge for MaterialNode (in-place generation).
   useEffect(() => {
     const exec = useExecutionStore.getState();
-    exec.setStartNodeExecution((nodeId: string) => {
-      void startExecution({ mode: 'single', nodeIds: [nodeId] });
-    });
+    exec.setStartNodeExecution((nodeId: string) => startExecution({
+      mode: 'single',
+      nodeIds: [nodeId],
+      immediate: true,
+    }));
     return () => {
       useExecutionStore.getState().setStartNodeExecution(null);
     };

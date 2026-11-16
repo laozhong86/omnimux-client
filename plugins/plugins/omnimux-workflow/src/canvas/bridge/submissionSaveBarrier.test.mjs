@@ -44,7 +44,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-function setup({ legacy = false } = {}) {
+function setup({ legacy = false, onPreflightError } = {}) {
   const node = prompt => ({ id: 'n1', type: 'text', position: { x: 0, y: 0 }, data: { prompt } });
   const remote = { id: 'ws', name: 'Canvas', version: 7, nodes: [node('initial')], edges: [] };
   const listeners = new Set();
@@ -103,7 +103,10 @@ function setup({ legacy = false } = {}) {
   });
   vm.runInContext(bundle.outputFiles[0].text, context);
   const persistence = context.hooks.useWorkspacePersistence(remote);
-  const controller = context.hooks.useExecutionController('ws', legacy ? undefined : { onBeforeStart: persistence.saveNow });
+  const controller = context.hooks.useExecutionController('ws', legacy ? undefined : {
+    onBeforeStart: persistence.saveNow,
+    ...(onPreflightError ? { onPreflightError } : {}),
+  });
   return { env, canvas, exec, persistence, controller,
     edit(prompt) { canvas.setNodes(() => [node(prompt)]); },
     autosave() { for (const [id, timer] of timers) if (timer.delay === 1000) { timers.delete(id); timer.fn(); } },
@@ -115,7 +118,9 @@ const settle = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(
 test('save failure prevents execution and does not leave the node pending', async () => {
   const h = setup(); h.edit('1dog');
   h.env.save = async () => ({ ok: false, status: 500, body: { message: 'disk full' } });
-  await h.controller.startExecution({ mode: 'single', nodeIds: ['n1'] });
+  const result = await h.controller.startExecution({ mode: 'single', nodeIds: ['n1'] });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'disk full');
   assert.equal(h.env.creates.length, 0);
   assert.equal(h.exec.error, 'disk full');
   assert.equal(h.exec.nodeStatuses.n1, undefined);
@@ -239,7 +244,9 @@ test('legacy caller without save hook omits expectedVersion', async () => {
 test('creation failure leaves no fake pending node', async () => {
   const h = setup();
   h.env.create = async () => ({ ok: false, body: { message: 'version conflict' } });
-  await h.controller.startExecution({ mode: 'single', nodeIds: ['n1'] });
+  const result = await h.controller.startExecution({ mode: 'single', nodeIds: ['n1'] });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'version conflict');
   assert.equal(h.exec.error, 'version conflict');
   assert.equal(h.exec.nodeStatuses.n1, undefined);
   assert.equal(h.canvas.nodes[0].data.executionStatus, undefined);
@@ -353,4 +360,55 @@ test('leaving A queues its final capture behind A PUT and ignores its late respo
   assert.equal(writes[1].payload.nodes[0].data.prompt, 'A final');
   assert.equal(writes[1].payload.expectedVersion, 8);
   assert.equal(h.canvas.nodes[0].data.prompt, 'B unchanged');
+});
+
+
+test('#48 immediate single submit fires create before a slow save barrier resolves', async () => {
+  const h = setup(); h.edit('1dog');
+  const pending = deferred();
+  h.env.save = () => pending.promise;
+  const start = h.controller.startExecution({ mode: 'single', nodeIds: ['n1'], immediate: true });
+  await settle();
+  assert.equal(h.env.creates.length, 1, 'create must not wait for saveNow');
+  assert.equal(h.env.saves.length, 0, 'immediate create must not invoke the save barrier');
+  assert.equal('expectedVersion' in h.env.creates[0].payload, false);
+  assert.equal(h.env.creates[0].payload.graph.nodes[0].data.prompt, '1dog', 'create must carry the click-time graph');
+  pending.resolve({ ok: true, body: { workspace: { ...h.env.remote, version: 8 } } });
+  const result = await start;
+  assert.equal(result.ok, true);
+});
+
+test('#48 rapid five immediate clicks only create one task', async () => {
+  const h = setup();
+  const starts = Array.from({ length: 5 }, () => h.controller.startExecution({
+    mode: 'single', nodeIds: ['n1'], immediate: true,
+  }));
+  const results = await Promise.all(starts);
+  assert.equal(h.env.creates.length, 1, '入口 guard + startingRef 必须只允许一次 create');
+  assert.equal(results.filter((result) => result.ok).length, 1);
+  assert.equal(results.filter((result) => result.ok === false).length, 4);
+});
+
+test('#48 immediate create failure returns a retryable error result', async () => {
+  const h = setup();
+  h.env.create = async () => ({ ok: false, body: { message: 'network down' } });
+  const result = await h.controller.startExecution({ mode: 'single', nodeIds: ['n1'], immediate: true });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'network down');
+  assert.equal(h.exec.nodeStatuses.n1, undefined);
+  assert.equal(h.canvas.nodes[0].data.executionStatus, undefined);
+});
+
+
+test('#48 immediate preflight failure is surfaced while create still uses the graph snapshot', async () => {
+  const errors = [];
+  const h = setup({ onPreflightError: (message) => errors.push(message) });
+  h.edit('1dog');
+  h.env.save = async () => ({ ok: false, status: 500, body: { message: 'disk full' } });
+  const result = await h.controller.startExecution({ mode: 'single', nodeIds: ['n1'], immediate: true });
+  await settle();
+  assert.equal(result.ok, true);
+  assert.deepEqual(errors, ['disk full']);
+  assert.equal(h.env.creates.length, 1);
+  assert.equal(h.env.creates[0].payload.graph.nodes[0].data.prompt, '1dog');
 });

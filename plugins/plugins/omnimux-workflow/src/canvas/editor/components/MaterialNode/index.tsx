@@ -80,6 +80,7 @@ import { planImportNodeFill } from '../../utils/resourcePickerPolicy.ts';
 import { resolveModelInputCapability } from '../../../../shared/validation/modelCompatibilityEvaluator.ts';
 import type { NodeSlotEngineState } from '../../../../shared/graph/slotContractTypes.ts';
 import type { SlotPickRequest } from './ConfigPanel/SlotWells/types.ts';
+import { submitNodeImmediate } from './submitNode.ts';
 import { MediaCardBody } from './CardBody/MediaCardBody';
 import { NodeCornerMarkers } from './StatusMask/NodeCornerMarkers';
 import { MaterialNodeHandles } from './NodeHandles/MaterialNodeHandles';
@@ -158,6 +159,8 @@ const MaterialNode: React.FC<NodeProps> = ({ id, data, selected }) => {
   const [mediaAspectHeight, setMediaAspectHeight] = useState<number | null>(null);
   const [isExtractingAudio, setIsExtractingAudio] = useState(false);
   const [isConvertingDepth, setIsConvertingDepth] = useState(false);
+  const [submitPending, setSubmitPending] = useState(false);
+  const submitPendingRef = useRef(false);
 
   const { setNodes } = useReactFlow();
 
@@ -241,7 +244,17 @@ const MaterialNode: React.FC<NodeProps> = ({ id, data, selected }) => {
     [nodeData, updateNodeData],
   );
 
+  const t = useT();
+
   const handleGenerate = useCallback(() => {
+    if (submitPendingRef.current) return;
+    const start = useExecutionStore.getState().startNodeExecution;
+    if (typeof start !== 'function') {
+      toast.error(t('error.createExecutionFailed'));
+      return;
+    }
+
+    setSubmitPending(true);
     const nodeKind = resolveNodeKind(nodeData);
     const needDefaultTool = nodeKind === 'generate' && (!nodeData.selectedTool || nodeData.selectedTool === 'text-editor');
     if (needDefaultTool) {
@@ -249,17 +262,20 @@ const MaterialNode: React.FC<NodeProps> = ({ id, data, selected }) => {
     }
 
     const quota = typeof window !== 'undefined' ? window.__omnimuxQuota : undefined;
-    if (!quota || typeof quota.ensureQuota !== 'function') {
-      useExecutionStore.getState().startNodeExecution?.(id);
-      return;
-    }
-    void Promise.resolve(quota.ensureQuota({ capability: 'canvas', correlationId: id })).then((gate: { ok?: boolean } | undefined) => {
-      if (gate && gate.ok === false) return;
-      useExecutionStore.getState().startNodeExecution?.(id);
+    // 创建请求由 execution bridge 立即发出；quota 并行检查，不挡在点击入口。
+    void submitNodeImmediate({
+      nodeId: id,
+      isPendingRef: submitPendingRef,
+      start: (nodeId) => start(nodeId),
+      ensureQuota: quota && typeof quota.ensureQuota === 'function'
+        ? (context) => quota.ensureQuota?.(context)
+        : undefined,
+      onSettled: () => setSubmitPending(false),
+      onQuotaFailure: () => toast.error(t('error.quotaCheckFailed')),
+    }).then((result) => {
+      if (result.ok === false && result.error) toast.error(result.error || t('error.createExecutionFailed'));
     });
-  }, [id, materialType, nodeData, updateNodeData]);
-
-  const t = useT();
+  }, [id, materialType, nodeData, t, updateNodeData]);
   const resourcePicker = useResourcePicker(id, typeof nodeData.__workspaceId === 'string' ? nodeData.__workspaceId : null);
   const kind = resolveNodeKind(nodeData);
 
@@ -1685,6 +1701,7 @@ const MaterialNode: React.FC<NodeProps> = ({ id, data, selected }) => {
             onUpdateNodeData={updateNodeData}
             onGenerate={handleGenerate}
             execBusy={execBusy}
+            isSubmitting={submitPending}
             onOpenResourcePicker={handleOpenResourcePicker}
           />
         </ConfigPanelShell>
