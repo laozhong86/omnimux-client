@@ -4,6 +4,7 @@ import {
   clearQuickShortcutSkill,
   quickShortcutLinks,
   resolveQuickShortcuts,
+  sameSkillIdentity,
 } from './catalog.js';
 import { getGlobalQuickShortcutStore } from './store.js';
 import { useOwnedPrompt } from './useOwnedPrompt.ts';
@@ -196,7 +197,9 @@ export function ComposerQuickShortcuts(props) {
   useEffect(() => subscribeSkillChanged((skill) => {
     const current = store.getSnapshot(sessionId);
     if (!current.skill) return;
-    if (skill) return;
+    // 同一技能（快捷方式自己发布）保持胶囊；其他来源或 null 都清掉快捷方式胶囊，
+    // 保证任意时刻只有一个可见 active skill。
+    if (skill && sameSkillIdentity(current.skill, skill)) return;
     store.set(sessionId, clearQuickShortcutSkill(current));
   }), [store, sessionId]);
 
@@ -226,8 +229,9 @@ export function ComposerQuickShortcuts(props) {
       return;
     }
     dismissNotice();
-    store.set(sessionId, { activeId: entry.id, links, skill: entry.skill });
-    publishActiveSkill(entry.skill);
+    const activeSkill = { ...entry.skill, origin: 'shortcut' };
+    store.set(sessionId, { activeId: entry.id, links, skill: activeSkill });
+    publishActiveSkill(activeSkill);
   }, [store, sessionId, writePrompt, notifyWriteFailed, dismissNotice]);
 
   // 只在新对话（空会话）且为 TikTok Agent 角色时出现；

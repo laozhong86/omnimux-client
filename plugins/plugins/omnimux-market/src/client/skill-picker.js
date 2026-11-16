@@ -42,6 +42,33 @@
       if (el && typeof el.focus === "function") el.focus();
     }
 
+    /**
+     * 清理输入框中的原生 slash token。
+     *
+     * 必须走 revision 守卫的编辑动作：`setDraft` 的官方契约是整段替换纯文本并
+     * 移除 inline reference chips，会误伤链接/引用。优先复用
+     * AttachmentSubmitBridge 的 `removeSkillToken`（内部 insertText），没有桥接
+     * 动作时才退回官方 `InputActions.insertText('', span)`。
+     */
+    function removeNativeSkillToken(input, slug, inputActions) {
+      const draft = input && typeof input.draft === "string" ? input.draft : "";
+      if (!slug || !draft) return false;
+      try {
+        const actions = typeof window !== "undefined" ? window.__omnimuxComposerActions : null;
+        if (actions && typeof actions.removeSkillToken === "function") {
+          return actions.removeSkillToken(slug) !== false;
+        }
+        if (!inputActions || typeof inputActions.insertText !== "function" || !Number.isSafeInteger(input.draftRev)) {
+          return false;
+        }
+        const range = SkillShelf.findSkillTokenRange(draft, slug);
+        if (!range) return false;
+        return inputActions.insertText("", { start: range.start, end: range.end, draftRev: input.draftRev }) !== false;
+      } catch {
+        return false;
+      }
+    }
+
     function renderBookOpenIcon(size = 16) {
       const px = typeof size === "number" && Number.isFinite(size) && size > 0 ? size : 16;
       return h("svg", {
@@ -580,29 +607,37 @@
       }, [close]);
 
       const clearActiveSkill = useCallback(() => {
+        const current = (typeof window !== "undefined" ? window.__omnimuxActiveSkill : null) || activeSkill;
+        const slug = current && current.origin === "slash" ? String(current.slug || current.skill || "") : "";
+        if (slug && input) removeNativeSkillToken(input, slug, inputActions);
         setActiveSkill(null);
         if (typeof window !== "undefined") {
           window.__omnimuxActiveSkill = null;
           try {
             window.dispatchEvent(new CustomEvent("omnimux:skill:changed", {
-              detail: { skill: null, category: "" },
+              detail: { skill: null, category: "", origin: "" },
             }));
           } catch {}
         }
         // 会话试用的卸下由技能市场统一监听 omnimux:skill:changed，这里不再重复调用。
-      }, []);
+      }, [activeSkill, input, inputActions]);
 
       const applyItem = useCallback((item) => {
         if (creationRef.current) creationRef.current.cancelled = true;
         focusComposerCard();
-        setActiveSkill(item);
+        const current = (typeof window !== "undefined" ? window.__omnimuxActiveSkill : null) || activeSkill;
+        const oldSlug = current && current.origin === "slash" ? String(current.slug || current.skill || "") : "";
+        if (oldSlug && input) removeNativeSkillToken(input, oldSlug, inputActions);
+        const identity = { ...item, origin: "custom" };
+        setActiveSkill(identity);
         if (typeof window !== "undefined") {
-          window.__omnimuxActiveSkill = item;
+          window.__omnimuxActiveSkill = identity;
           try {
             window.dispatchEvent(new CustomEvent("omnimux:skill:changed", {
               detail: {
-                skill: item,
-                category: item.category || (item.categories && item.categories[0]) || "",
+                skill: identity,
+                category: identity.category || (identity.categories && identity.categories[0]) || "",
+                origin: identity.origin,
               },
             }));
           } catch {}
@@ -631,7 +666,7 @@
         } catch {}
         setOpen(false);
         return true;
-      }, []);
+      }, [activeSkill, input, inputActions]);
 
       const onExplore = useCallback(() => {
         writePlazaSkillsIntent();
