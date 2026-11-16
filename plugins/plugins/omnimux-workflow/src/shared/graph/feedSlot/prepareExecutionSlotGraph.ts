@@ -11,6 +11,7 @@ import { buildCanvasUpstreamFingerprint } from '../canvasInputSources.ts';
 import type { CanvasNode } from '../canvasInputMutationGateway.ts';
 import type { Edge } from '@xyflow/react';
 import { resolveSlotOperation } from './resolveSlotOperation.ts';
+import { normalizeVideoParamsForSchema } from '../../../canvas/editor/components/MaterialNode/ConfigPanel/videoParams/videoParamNormalization.ts';
 
 /** Freeze legacy hydration for dispatch without modifying the persisted graph or topology. */
 export function prepareExecutionSlotGraph<
@@ -33,12 +34,24 @@ export function prepareExecutionSlotGraph<
       : '';
     if (capabilityId && materialTools[capabilityId]?.executorKey) return structuredClone(node);
     const data = structuredClone(node.data ?? {});
-    const params = (data.params ?? {}) as Record<string, unknown>;
+    let params = (data.params ?? {}) as Record<string, unknown>;
     const kind = (data.materialType ?? 'text') as keyof NonNullable<CapabilityCatalog['defaults']>;
     const model = resolveModelView(view, (params.model ?? catalog?.defaults?.[kind]) as string | undefined);
     params.model ??= model?.id;
     params.operation ??= resolveSlotOperation(catalog, model?.id, params.operation, kind,
       buildCanvasUpstreamFingerprint(node.id, nodes as unknown as CanvasNode[], nextEdges as unknown as Edge[]));
+    if (kind === 'video' && catalog?.source === 'omnimux') {
+      // The gateway catalog is the execution contract. A model row without
+      // model-level parameters can still carry operation-level constraints;
+      // skipping normalization here would dispatch a value the read side
+      // already normalized. Offline static stubs keep their historical shape.
+      const normalized = normalizeVideoParamsForSchema({
+        params,
+        operationId: typeof params.operation === 'string' ? params.operation : undefined,
+        catalog,
+      });
+      params = normalized.params;
+    }
     data.params = params;
     // Current bindings are explicit intent; preparation is not a migration or picker.
     if (data.inputBindingVersion === 1) return { ...node, data } as N;

@@ -87,7 +87,7 @@
       "version": "1.0.0-rc.3",
       "path": "plugins/plugins/omnimux-workflow",
       "spec": "link:../../plugins/plugins/omnimux-workflow",
-      "contentHash": "sha256:990524494563b94b2f908fd5a843e174181092fdea55c97f513ad87540711490"
+      "contentHash": "sha256:973b4d98723d5b254b71c1ae35a39bc42768eb08720783ccc8285a5775ee478a"
     }
   ]
 }
