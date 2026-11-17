@@ -181,6 +181,38 @@ it('copies only the declared extension from a nested files glob', async () => {
   expect(() => verifyNextPayload(physicalPayload(output))).not.toThrow()
 })
 
+it('skips a workspace package node_modules self-reference instead of following it', async () => {
+  const { root, desktop, market } = workspace()
+  // pnpm gives a workspace package's devDependency on itself a link back to the package root.
+  mkdirSync(join(market, 'extension', 'node_modules'), { recursive: true })
+  writeFileSync(join(market, 'extension', 'background.js'), 'export {}\n')
+  const self = join(market, 'extension', 'node_modules', 'dsh-community-market')
+  if (process.platform === 'win32') symlinkSync(market, self, 'junction')
+  else symlinkSync(join('..', '..'), self, 'dir')
+  const manifest = JSON.parse(readFileSync(join(market, 'package.json'), 'utf8')) as { files: string[] }
+  manifest.files.push('extension')
+  writeFileSync(join(market, 'package.json'), JSON.stringify(manifest) + '\n')
+
+  const output = join(root, 'payload')
+  await preparePayload({ desktopRoot: desktop, output, target, electronVersion: '44.0.0' })
+  expect(existsSync(join(output, 'node_modules', 'dsh-community-market', 'extension', 'background.js'))).toBe(true)
+  expect(existsSync(join(output, 'node_modules', 'dsh-community-market', 'extension', 'node_modules'))).toBe(false)
+  expect(() => verifyNextPayload(physicalPayload(output))).not.toThrow()
+})
+
+it('keeps a nested node_modules directory of an installed package', async () => {
+  const { root, desktop } = workspace()
+  // pnpm ships its private native build tools below dist/node_modules; that directory is part of the package.
+  const pnpm = join(desktop, 'node_modules', 'pnpm')
+  mkdirSync(join(pnpm, 'dist', 'node_modules', 'node-gyp-bin'), { recursive: true })
+  writeFileSync(join(pnpm, 'dist', 'node_modules', 'node-gyp-bin', 'node-gyp'), '#!/usr/bin/env node\n')
+
+  const output = join(root, 'payload')
+  await preparePayload({ desktopRoot: desktop, output, target, electronVersion: '44.0.0' })
+  expect(existsSync(join(output, 'node_modules', 'pnpm', 'dist', 'node_modules', 'node-gyp-bin', 'node-gyp'))).toBe(true)
+  expect(() => verifyNextPayload(physicalPayload(output))).not.toThrow()
+})
+
 it('prunes only incompatible optional packages and their exclusive dependencies before copying and sealing', async () => {
   const { root, desktop } = workspace()
   const modules = join(desktop, 'node_modules')
