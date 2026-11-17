@@ -67,9 +67,11 @@ This fork syncs with upstream weekly. Before any merge from `origin/master`, fol
 Distribution assets (macOS arm64/x64 DMGs & Windows x64 NSIS) are hosted in Cloudflare R2 bucket `omnimux-dist` via `https://dl.omnimux.ai`.
 
 - macOS artifact standard: **separate arm64 and x64 DMGs** (`OmniMux-<version>-arm64.dmg` / `OmniMux-<version>-x64.dmg`), each built, signed, notarized, and stapled independently. No universal build is produced.
+- macOS release builds run on a local Mac with the Developer ID keychain: from `app/` run `corepack yarn release:mac:arm64` and `corepack yarn release:mac:x64`, then attach the resulting DMGs to the GitHub Release with `gh release upload v<version> ...`; `.github/workflows/release.yml` builds only the Windows installer.
 - Windows artifact standard: **x64 NSIS Installer** (`OmniMux-<version>-x64-Setup.exe`). Supports silent install `/S` for auto-update and **website / CDN** distribution via `yarn dist:win` (unsigned).
 - **Current Windows policy**: website-first, Microsoft Store paused (zero extra signing budget). Paid Authenticode / Store resubmission remains optional and only after an explicit paid-signing decision.
 - **Public download page**: primary CTAs MUST point at `https://dl.omnimux.ai/` (not Store, not legacy `dshdesktop.cn`).
+- **Forward-only CDN**: `r2-publish.yml` and `r2-dist-sync.mjs upload` run `verify-version-advance.mjs` first; a candidate version equal to or older than the live `version-<channel>.json` is rejected. Rollback is a forward-fix with a higher version, never a latest re-point to an older build.
 - Sync artifacts to R2: `yarn dist:r2-sync` (or `node scripts/r2-dist-sync.mjs upload`).
 - Verify CDN endpoints: `yarn dist:r2-verify` (or `node scripts/r2-dist-sync.mjs verify`).
 - List R2 bucket assets: `yarn dist:r2-list` (or `node scripts/r2-dist-sync.mjs list`).

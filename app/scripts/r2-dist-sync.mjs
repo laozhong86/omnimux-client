@@ -20,7 +20,9 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
+import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
+import { assertRemoteVersionAdvances } from './verify-version-advance.mjs'
 
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID
@@ -224,6 +226,34 @@ async function verifyEndpoint(key, expectedSize) {
   }
 }
 
+/** Platform token → metadata key and latest alias used by the desktop updater. */
+const VERIFY_PLATFORMS = {
+  'mac-arm64': { metadataKey: 'macArm64', latestKey: 'releases/latest/OmniMux-arm64.dmg' },
+  'mac-x64': { metadataKey: 'macX64', latestKey: 'releases/latest/OmniMux-x64.dmg' },
+  windows: { metadataKey: 'windows', latestKey: 'releases/latest/OmniMux-x64-Setup.exe' },
+}
+
+/** Fetch JSON without relying on a stale CDN edge entry. */
+async function fetchJson(url) {
+  const res = await fetch(`${url}${url.includes('?') ? '&' : '?'}verify=${String(Date.now())}`, {
+    headers: { 'cache-control': 'no-cache', pragma: 'no-cache' },
+  })
+  if (!res.ok) throw new Error(`GET ${url} failed: HTTP ${res.status} ${res.statusText}`)
+  return res.json()
+}
+
+/** Download one artifact and return its sha256 without buffering the whole file. */
+async function downloadSha256(url) {
+  const res = await fetch(`${url}${url.includes('?') ? '&' : '?'}verify=${String(Date.now())}`, {
+    headers: { 'cache-control': 'no-cache', pragma: 'no-cache' },
+  })
+  if (!res.ok) throw new Error(`GET ${url} failed: HTTP ${res.status} ${res.statusText}`)
+  if (res.body === null) throw new Error(`GET ${url} returned an empty body`)
+  const hash = createHash('sha256')
+  for await (const chunk of Readable.fromWeb(res.body)) hash.update(chunk)
+  return hash.digest('hex')
+}
+
 /**
  * 打印使用帮助
  */
@@ -243,6 +273,9 @@ OmniMux R2 产物同步与分发工具
   --mac-dmg <path>                  直接指定 macOS Universal .dmg 镜像包路径
   --force                           强制重新上传已存在的同大小文件
   --skip-verify                     上传后跳过 CDN 巡检
+  --verify-hashes                   verify 时下载 latest 产物并核对 version-*.json 的 sha256
+  --required-platforms <list>       verify 时要求 metadata 必须包含的平台（mac-arm64,mac-x64,windows）
+  --partial                         upload 时只上传 releases/v<version>/ 归档，不更新 latest、不写 version-*.json
 `)
 }
 
@@ -255,7 +288,7 @@ async function main() {
     return
   }
 
-  const token = resolveCloudflareToken()
+  const token = command === 'list' || command === 'upload' ? resolveCloudflareToken() : null
 
   if (command === 'list') {
     console.log(`📦 查询 Cloudflare R2 存储桶 '${BUCKET_NAME}' 产物清单...`)
@@ -359,6 +392,45 @@ async function main() {
       }
     }
 
+    const requiredIdx = args.indexOf('--required-platforms')
+    const requiredPlatforms = requiredIdx === -1 ? [] : (args[requiredIdx + 1] ?? '').split(',').map(token => token.trim()).filter(Boolean)
+    const verifyHashes = args.includes('--verify-hashes')
+    if (requiredPlatforms.length > 0 || verifyHashes) {
+      const tag = /-([0-9A-Za-z.-]+)$/u.exec(version)?.[1]
+      const channel = tag === 'beta' ? 'beta' : tag === 'next' ? 'next' : 'stable'
+      try {
+        const metadata = await fetchJson(`${CDN_BASE_URL}/api/desktop/version-${channel}.json`)
+        if (metadata?.version !== version) {
+          throw new Error(`metadata version ${String(metadata?.version)} does not match ${version}`)
+        }
+        if (metadata?.channel !== channel) {
+          throw new Error(`metadata channel ${String(metadata?.channel)} does not match ${channel}`)
+        }
+        for (const token of requiredPlatforms) {
+          const platform = VERIFY_PLATFORMS[token]
+          if (platform === undefined) throw new Error(`unknown required platform ${JSON.stringify(token)}`)
+          if (metadata.sha256?.[platform.metadataKey] === undefined) {
+            throw new Error(`metadata is missing required platform ${token}`)
+          }
+        }
+        if (verifyHashes) {
+          for (const [token, platform] of Object.entries(VERIFY_PLATFORMS)) {
+            const expected = metadata.sha256?.[platform.metadataKey]
+            if (expected === undefined) continue
+            console.log(`  ⬇️  sha256 ${token} ${platform.latestKey}`)
+            const actual = await downloadSha256(`${CDN_BASE_URL}/${platform.latestKey}`)
+            if (actual !== expected) {
+              throw new Error(`${token} sha256 mismatch: metadata=${expected}, downloaded=${actual}`)
+            }
+            console.log(`  ✅ [SHA256] ${token} ${actual}`)
+          }
+        }
+      } catch (err) {
+        allOk = false
+        console.log(`  ❌ [METADATA] ${err.message}`)
+      }
+    }
+
     if (!allOk) {
       process.exitCode = 1
     }
@@ -367,7 +439,8 @@ async function main() {
 
   if (command === 'upload') {
     const isForce = args.includes('--force')
-    console.log(`🚀 开始执行 OmniMux v${version} 产物全链路同步到 R2 (dl.omnimux.ai)...`)
+    const isPartial = args.includes('--partial')
+    console.log(`🚀 开始执行 OmniMux v${version} 产物全链路同步到 R2 (dl.omnimux.ai)...${isPartial ? ' [partial: latest/metadata untouched]' : ''}`)
 
     // 获取当前桶内已有对象字典，实现智能跳过
     const existingObjects = await listBucketObjects(token)
@@ -472,6 +545,14 @@ async function main() {
       version = artifactVersion
     }
 
+    // Hard release gate: the CDN manifest only moves forward. Only a full
+    // publish touches live metadata/latest; a partial archive upload does not.
+    if (isPartial) {
+      console.log('📦 partial 模式：跳过 CDN 版本前进守卫（不会写 latest / version-*.json）')
+    } else {
+      await assertRemoteVersionAdvances({ version, baseUrl: CDN_BASE_URL })
+    }
+
     console.log(`📌 匹配到本地待分发文件：`)
     if (winExePath) console.log(`  • Windows EXE: ${winExePath}`)
     for (const { path, arch } of macArtifacts) {
@@ -487,10 +568,12 @@ async function main() {
         `releases/v${version}/${actualWinName}`,
         `releases/v${version}/OmniMux-${version}-x64-Setup.exe`,
         `releases/v${version}/DSH-Desktop-${version}-x64-Setup.exe`,
-        `releases/latest/OmniMux-Setup.exe`,
-        `releases/latest/OmniMux-x64-Setup.exe`,
-        `releases/latest/DSH-Desktop-Setup.exe`,
       ])
+      if (!isPartial) {
+        for (const key of ['releases/latest/OmniMux-Setup.exe', 'releases/latest/OmniMux-x64-Setup.exe', 'releases/latest/DSH-Desktop-Setup.exe']) {
+          winKeys.add(key)
+        }
+      }
       for (const key of winKeys) uploadPlan.push({ key, file: winExePath, size: winStat.size })
     }
 
@@ -500,47 +583,59 @@ async function main() {
       const macKeys = new Set([`releases/v${version}/${actualMacName}`])
       if (arch === 'arm64') {
         macKeys.add(`releases/v${version}/OmniMux-${version}-arm64.dmg`)
-        macKeys.add(`releases/latest/OmniMux-arm64.dmg`)
-        macKeys.add(`releases/latest/OmniMux-mac.dmg`)
-        // Keep universal/legacy aliases pointing at arm64 when no separate universal DMG is built
-        if (!macArtifacts.some(item => item.arch === 'universal')) {
-          macKeys.add(`releases/latest/OmniMux-universal.dmg`)
-          macKeys.add(`releases/latest/DSH-Desktop.dmg`)
+        if (!isPartial) {
+          macKeys.add(`releases/latest/OmniMux-arm64.dmg`)
+          macKeys.add(`releases/latest/OmniMux-mac.dmg`)
+          // Keep universal/legacy aliases pointing at arm64 when no separate universal DMG is built
+          if (!macArtifacts.some(item => item.arch === 'universal')) {
+            macKeys.add(`releases/latest/OmniMux-universal.dmg`)
+            macKeys.add(`releases/latest/DSH-Desktop.dmg`)
+          }
         }
       } else if (arch === 'x64') {
         macKeys.add(`releases/v${version}/OmniMux-${version}-x64.dmg`)
-        macKeys.add(`releases/latest/OmniMux-x64.dmg`)
+        if (!isPartial) macKeys.add(`releases/latest/OmniMux-x64.dmg`)
       } else {
         macKeys.add(`releases/v${version}/OmniMux-${version}-universal.dmg`)
-        macKeys.add(`releases/latest/OmniMux-universal.dmg`)
+        if (!isPartial) macKeys.add(`releases/latest/OmniMux-universal.dmg`)
       }
       for (const key of macKeys) uploadPlan.push({ key, file: macPath, size: macStat.size })
     }
 
-    // Release metadata the desktop updaters poll. It lives at a fixed path beside
-    // nothing else, so it is uploaded as-is rather than under releases/.
-    const metadataDir = join(searchDir ?? join(ROOT_DIR, 'dist/release-download'), 'api', 'desktop')
-    if (existsSync(metadataDir)) {
-      for (const name of readdirSync(metadataDir)) {
-        if (!name.endsWith('.json')) continue
-        const file = join(metadataDir, name)
-        const stat = statSync(file)
-        uploadPlan.push({ key: `api/desktop/${name}`, file, size: stat.size })
+    if (!isPartial) {
+      // Release metadata the desktop updaters poll. It lives at a fixed path beside
+      // nothing else, so it is uploaded as-is rather than under releases/.
+      const metadataDir = join(searchDir ?? join(ROOT_DIR, 'dist/release-download'), 'api', 'desktop')
+      if (existsSync(metadataDir)) {
+        for (const name of readdirSync(metadataDir)) {
+          if (!/^version-(?:stable|beta|next)\.json$/u.test(name)) continue
+          const file = join(metadataDir, name)
+          const metadata = JSON.parse(readFileSync(file, 'utf8'))
+          for (const key of ['macArm64', 'macX64', 'windows']) {
+            if (typeof metadata.sha256?.[key] !== 'string' || metadata.sha256[key].length === 0) {
+              throw new Error(`refusing to publish ${name}: missing required platform hash ${key}`)
+            }
+          }
+          const stat = statSync(file)
+          uploadPlan.push({ key: `api/desktop/${name}`, file, size: stat.size })
+        }
+        console.log(`  • 版本元数据: ${metadataDir}`)
+      } else {
+        console.log(`  ⚠️  未找到版本元数据目录 ${metadataDir}；应用将无法发现更新`)
       }
-      console.log(`  • 版本元数据: ${metadataDir}`)
-    } else {
-      console.log(`  ⚠️  未找到版本元数据目录 ${metadataDir}；应用将无法发现更新`)
-    }
 
-    // Plugin market index. Plugins ship independently of the desktop application, so
-    // this object is the only thing that tells an installed build what is available.
-    const indexFile = join(ROOT_DIR, 'dist', 'dsh-index.json')
-    if (existsSync(indexFile)) {
-      const stat = statSync(indexFile)
-      uploadPlan.push({ key: 'plugins/dsh-index.json', file: indexFile, size: stat.size })
-      console.log(`  • 插件索引: ${indexFile}`)
+      // Plugin market index. Plugins ship independently of the desktop application, so
+      // this object is the only thing that tells an installed build what is available.
+      const indexFile = join(ROOT_DIR, 'dist', 'dsh-index.json')
+      if (existsSync(indexFile)) {
+        const stat = statSync(indexFile)
+        uploadPlan.push({ key: 'plugins/dsh-index.json', file: indexFile, size: stat.size })
+        console.log(`  • 插件索引: ${indexFile}`)
+      } else {
+        console.log(`  ⚠️  未找到插件索引 ${indexFile}；请先运行 scripts/build-plugin-index.mjs`)
+      }
     } else {
-      console.log(`  ⚠️  未找到插件索引 ${indexFile}；请先运行 scripts/build-plugin-index.mjs`)
+      console.log('  • partial 模式：跳过版本元数据与插件索引上传')
     }
 
     console.log(`\n📤 开始同步 ${uploadPlan.length} 个分发节点...`)
