@@ -212,9 +212,19 @@ export interface UpstreamTaskRef {
   owner?: UpstreamTaskOwner;
 }
 
+/** Per-dispatch catalog and validated submission for one canvas node. */
+export interface WorkflowSubmission {
+  catalog: import('../../shared/api.ts').CapabilityCatalog;
+  submit(req: SubmitRequest): Promise<{ task: SubmitResult; model?: string }>;
+}
+
 export interface GenerationGateway {
   /** Submit a generation task (wait:false semantics). */
-  submit(req: SubmitRequest): Promise<SubmitResult>;
+  submit: {
+    (req: SubmitRequest): Promise<SubmitResult>;
+    /** Optional on the submit function so wrappers that replace it keep their own dispatch path. */
+    openWorkflowSubmission?(): Promise<WorkflowSubmission>;
+  };
   /** Poll a task and download the artifact to its dest. */
   awaitTask(taskId: string, dest: string, signal?: AbortSignal): Promise<AwaitTaskResult>;
   /**

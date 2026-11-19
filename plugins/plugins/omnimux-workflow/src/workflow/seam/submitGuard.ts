@@ -1,7 +1,7 @@
 import type { CapabilityCatalog } from '../../shared/api.ts';
 import { buildContractView, buildUpstreamFingerprint, matchOperationInputs, resolveModelView } from '../../shared/validation/compatKernel.ts';
 import { buildEffectiveOpsUiState } from '../../shared/validation/operationUi.ts';
-import type { ReferenceAssetPayload, SubmitRequest } from './gateway.ts';
+import type { GenerationGateway, ReferenceAssetPayload, SubmitRequest, WorkflowSubmission } from './gateway.ts';
 import { SeamGatewayError } from './SeamGatewayError.ts';
 import { submissionFingerprint, submissionReferences } from './submissionInputs.ts';
 
@@ -31,8 +31,8 @@ function submissionModel(req: SubmitRequest, catalog: CapabilityCatalog) {
 
 /** Only the executor may resolve an omitted operation using the shared canvas policy. */
 export function resolveExecutorSubmission(req: SubmitRequest, catalog: CapabilityCatalog): SubmitRequest {
-  const model = submissionModel(req, catalog);
   if (req.operation !== undefined) return resolveCanvasSubmission(req, catalog);
+  const model = submissionModel(req, catalog);
   const state = buildEffectiveOpsUiState({
     catalog, modelId: model.id, outputType: req.capability, fingerprint: submissionFingerprint(req),
   });
@@ -89,4 +89,24 @@ export function resolveCanvasSubmission(req: SubmitRequest, catalog: CapabilityC
   return { ...req, model: model.id,
     ...(req.references ? { references: req.references.map((ref) => normalized.get(ref)!) } : {}),
     ...(trackReference ? { audioTrack: normalized.get(trackReference)! } : {}) };
+}
+
+/** Keep the authoritative snapshot private. Preparation code receives its own working copy. */
+export function createWorkflowSubmission(
+  catalog: CapabilityCatalog, submitResolved: GenerationGateway['submit'],
+): WorkflowSubmission {
+  const snapshot = structuredClone(catalog);
+  return {
+    catalog: structuredClone(snapshot),
+    async submit(request) {
+      const resolved = resolveExecutorSubmission(request, snapshot);
+      return { task: await submitResolved(resolved), model: resolved.model };
+    },
+  };
+}
+
+/** Embedders that supply the original gateway interface still get guarded executor submissions. */
+export async function openWorkflowSubmission(gateway: GenerationGateway, catalog?: CapabilityCatalog): Promise<WorkflowSubmission> {
+  if (gateway.submit.openWorkflowSubmission) return gateway.submit.openWorkflowSubmission();
+  return createWorkflowSubmission(catalog ?? await gateway.capabilities(), request => gateway.submit(request));
 }

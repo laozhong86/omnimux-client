@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,12 +9,17 @@ import { fileURLToPath } from 'node:url';
 const bundle = await build({ stdin: { contents: `
   export { createExecutionManager } from '../src/workflow/execution/ExecutionManager.ts';
   export { createExecutionRoutes } from '../src/workflow/routes/executionRoutes.ts';
+  export { createWorkflowRunTool } from '../src/workflow/agent/agentReadTools.ts';
+  export { createHeadlessExecutionSeam } from '../src/workflow/execution/HeadlessExecutionSeam.ts';
+  export { buildInitialOutputs } from '../src/workflow/execution/executionInputs.ts';
+  export { prepareExecutionSlotGraph } from '../src/shared/graph/feedSlot/prepareExecutionSlotGraph.ts';
   export { executionInputSignatures } from '../src/workflow/execution/executionTypes.ts';
   export { createMaterialGatewayExecutor } from '../src/workflow/execution/materialGatewayExecutor.ts';
   export { mockCatalog } from '../src/workflow/seam/mockCatalog.ts';
   export { SeamGatewayError } from '../src/workflow/seam/SeamGatewayError.ts';
 `, resolveDir: fileURLToPath(new URL('.', import.meta.url)) }, bundle: true, write: false, format: 'esm', platform: 'node' });
 const { createExecutionManager, createExecutionRoutes, executionInputSignatures, createMaterialGatewayExecutor,
+  createWorkflowRunTool, createHeadlessExecutionSeam, buildInitialOutputs, prepareExecutionSlotGraph,
   mockCatalog, SeamGatewayError } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
 
 function harness(t, { kind = 'image', source = false, error = new Error('temporary 401') } = {}) {
@@ -100,6 +105,137 @@ for (const [label, mutate] of [
     inputSignatures: executionInputSignatures(h.snapshot) };
   assert.deepEqual(h.manager.findRecoverableTasks(options), {});
 });
+
+// Pre-unification Agent/Headless passed the prepared subset and external
+// nodeOutputs to createExecution, without the raw workspace identity.
+async function recordOldSingleNodeExecution(h) {
+  const prepared = prepareExecutionSlotGraph(h.snapshot.nodes, h.snapshot.edges, mockCatalog());
+  const initialOutputs = buildInitialOutputs({ ...prepared, id: h.snapshot.id }, new Set(['target']), { mediaDir: join(h.root, 'media') });
+  const entry = h.manager.createExecution({ workspaceId: h.snapshot.id, nodes: [prepared.nodes.at(-1)],
+    edges: prepared.edges, initialOutputs });
+  await h.ended(entry.context.id);
+  assert.equal(entry.context.status, 'error');
+  const ref = entry.context.readNodeUpstreamTask('target');
+  assert.ok(ref);
+  h.restart();
+  return { ref, id: entry.context.id };
+}
+
+async function checkOldEntry(t, entry) {
+  const h = harness(t, { source: true });
+  const { ref } = await recordOldSingleNodeExecution(h);
+  h.catalogOff();
+  const catalogCalls = h.calls.catalog;
+  const deps = { store: { get: () => h.snapshot, resolveProjectRoot: () => h.root }, mediaDir: join(h.root, 'media'),
+    getCatalog: h.gateway.capabilities, executionManager: h.manager };
+  const result = entry === 'Agent'
+    ? await createWorkflowRunTool(deps).execute({ workspace_id: h.snapshot.id, mode: 'single', node_ids: ['target'] })
+    : await createHeadlessExecutionSeam({ ...deps, workspaceStore: deps.store }).executeHeadless({ workspaceId: h.snapshot.id, mode: 'single', nodeIds: ['target'] });
+  assert.equal((await h.ended(result.executionId)).context.status, 'completed');
+  assert.equal(h.calls.catalog, catalogCalls);
+  assert.equal(h.calls.submit, 1);
+  assert.deepEqual(h.calls.collect, [ref]);
+}
+test('old prepared Agent ledger collects unselected text after restart without a catalog', t => checkOldEntry(t, 'Agent'));
+test('old prepared Headless ledger collects unselected text after restart without a catalog', t => checkOldEntry(t, 'Headless'));
+
+async function checkOldEditedInput(t, edit) {
+  const h = harness(t, { source: true });
+  await recordOldSingleNodeExecution(h);
+  edit(h);
+  const result = await h.request();
+  assert.equal(result.status, 200);
+  const entry = await h.ended(result.body.execution.id);
+  assert.equal(entry.context.get('executionInputsChanged').target, true);
+  assert.equal(h.calls.submit, 2);
+  assert.deepEqual(h.calls.collect, []);
+}
+test('changed source text cannot collect from an old prepared ledger', t => checkOldEditedInput(t, h => { h.snapshot.nodes[0].data.content = 'another source'; }));
+test('changed explicit occupancy cannot collect from an old prepared ledger', t => checkOldEditedInput(t, h => { h.snapshot.nodes[1].data.slotBindings = {}; }));
+test('changed explicit parameters start new work after an old prepared run', t => checkOldEditedInput(t, h => { h.snapshot.nodes[1].data.params.seed = 123; }));
+test('changed explicit model starts new work after an old prepared run', t => checkOldEditedInput(t, h => {
+  h.snapshot.nodes[1].data.params.model = 'image-2';
+  h.gateway.capabilities = () => {
+    const catalog = mockCatalog();
+    catalog.models.push({ ...catalog.models.find(model => model.id === 'mock-image-1'), id: 'image-2' });
+    catalog.image.push({ ...catalog.image[0], id: 'image-2' });
+    return catalog;
+  };
+}));
+test('changed explicit operation goes through normal admission after an old prepared run', async t => {
+  const h = harness(t, { source: true });
+  await recordOldSingleNodeExecution(h);
+  h.snapshot.nodes[1].data.params.operation = 'image_to_image';
+  const result = await h.request();
+  assert.equal(result.status, 400);
+  assert.notEqual(result.body.reasonCode, 'previous_task_input_unverified');
+  assert.equal(h.calls.submit, 1);
+  assert.deepEqual(h.calls.collect, []);
+});
+
+test('unprovable old catalog defaults expose the accepted task without submitting again', async t => {
+  const h = harness(t, { source: true });
+  delete h.snapshot.nodes[1].data.params.model;
+  const { ref, id } = await recordOldSingleNodeExecution(h);
+  h.catalogOff();
+  const result = await h.request();
+  assert.equal(result.status, 400);
+  assert.equal(result.body.reasonCode, 'previous_task_input_unverified');
+  assert.ok(result.body.message.includes(id));
+  assert.ok(result.body.message.includes(ref.taskId));
+  assert.equal(h.calls.submit, 1);
+  assert.deepEqual(h.calls.collect, []);
+});
+
+test('unchanged old catalog defaults collect when the current projection matches', async t => {
+  const h = harness(t, { source: true });
+  delete h.snapshot.nodes[1].data.params.model;
+  const { ref } = await recordOldSingleNodeExecution(h);
+  const reads = h.calls.catalog;
+  const result = await h.request();
+  assert.equal(result.status, 200);
+  assert.equal((await h.ended(result.body.execution.id)).context.status, 'completed');
+  assert.equal(h.calls.catalog - reads, 1);
+  assert.deepEqual(h.calls.collect, [ref]);
+  assert.equal(h.calls.submit, 1);
+});
+
+test('old prepared ledger cannot prove local media bytes after the external file disappears', async t => {
+  const h = harness(t, { source: true });
+  const path = join(h.root, 'old-reference.png');
+  writeFileSync(path, Buffer.from([1, 2, 3]));
+  h.snapshot.nodes[0].data = { nodeKind: 'import', materialType: 'image', path, mimeType: 'image/png', sizeBytes: 3 };
+  h.snapshot.nodes[1].data.params.operation = 'image_to_image';
+  const { ref } = await recordOldSingleNodeExecution(h);
+  rmSync(path);
+  h.catalogOff();
+  const result = await h.request();
+  assert.equal(result.body.reasonCode, 'previous_task_input_unverified');
+  assert.ok(result.body.message.includes(ref.taskId));
+  assert.equal(h.calls.submit, 1);
+  assert.deepEqual(h.calls.collect, []);
+});
+
+async function checkOldHttpLedger(t, edited) {
+  const h = harness(t, { source: true });
+  const original = await h.request();
+  const id = original.body.execution.id;
+  const ref = (await h.ended(id)).context.readNodeUpstreamTask('target');
+  h.restart();
+  const file = join(h.root, 'executions', id, 'execution.json');
+  const record = JSON.parse(readFileSync(file, 'utf8'));
+  delete record.variables.executionInputSignatureScope;
+  writeFileSync(file, JSON.stringify(record));
+  if (edited) h.snapshot.nodes[0].data.content = 'changed source';
+  h.catalogOff();
+  const result = await h.request();
+  assert.equal(result.status, edited ? 400 : 200);
+  if (!edited) assert.equal((await h.ended(result.body.execution.id)).context.status, 'completed');
+  assert.deepEqual(h.calls.collect, edited ? [] : [ref]);
+  assert.equal(h.calls.submit, 1);
+}
+test('old HTTP ledger accepts unchanged upstream text', t => checkOldHttpLedger(t, false));
+test('old HTTP ledger rejects changed upstream text', t => checkOldHttpLedger(t, true));
 
 test('unchanged signature is key-order independent but all unknown input fields matter', () => {
   const graph = { nodes: [{ id: 'n', type: 'material', data: { prompt: 'p', params: { seed: 1, model: 'm' } } }], edges: [] };
@@ -220,6 +356,51 @@ test('route catalog pause with another recovery completed first keeps its fixed 
   assert.equal(resumed.context.get('executionInputsChanged').target, false);
   assert.equal(h.calls.submit, 2, 'one target and one genuinely new other task only');
 });
+
+async function checkAcceptedDuringLookup(t, alreadyAccepted) {
+  const h = harness(t);
+  const selected = ['target'];
+  if (alreadyAccepted) {
+    const other = structuredClone(h.snapshot.nodes[0]);
+    other.id = 'other';
+    other.data.prompt = 'other request';
+    h.snapshot.nodes.push(other);
+    selected.push(other.id);
+    const first = await h.request({ nodeIds: [other.id] });
+    assert.equal(first.status, 200);
+    assert.equal((await h.ended(first.body.execution.id)).context.status, 'error');
+  }
+
+  const catalog = h.gateway.capabilities;
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  h.gateway.capabilities = async () => {
+    h.gateway.capabilities = catalog;
+    entered.resolve();
+    await release.promise;
+    return catalog();
+  };
+  const pending = h.request({ nodeIds: selected });
+  await entered.promise;
+  let accepted;
+  try {
+    const concurrent = await h.request();
+    assert.equal(concurrent.status, 200);
+    accepted = (await h.ended(concurrent.body.execution.id)).context.readNodeUpstreamTask('target');
+    assert.ok(accepted);
+  } finally { release.resolve(); }
+
+  const admitted = await pending;
+  assert.equal(admitted.status, 200);
+  const recovered = await h.ended(admitted.body.execution.id);
+  assert.equal(h.calls.submit, selected.length, 'each node submits exactly once');
+  assert.equal(recovered.context.status, 'completed');
+  assert.ok(h.calls.collect.some(ref => ref.taskRef === accepted.taskRef));
+  assert.equal(h.calls.collect.length, selected.length);
+  assert.equal(recovered.context.get('executionInputsChanged').target, false);
+}
+test('task accepted during catalog lookup is collected with an empty initial recovery plan', t => checkAcceptedDuringLookup(t, false));
+test('task accepted during catalog lookup is collected alongside an earlier accepted node', t => checkAcceptedDuringLookup(t, true));
 
 test('not-reconcilable recovery preserves upstream input and refuses fallback with zero new submits until complete admission', async t => {
   const h = harness(t, { source: true });
