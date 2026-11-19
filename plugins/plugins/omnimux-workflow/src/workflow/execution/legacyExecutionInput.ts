@@ -1,16 +1,16 @@
 import { prepareExecutionSlotGraph } from '../../shared/graph/feedSlot/prepareExecutionSlotGraph.ts';
 import { canonicalJson } from '../../shared/validation/compatKernel.ts';
+import type { ExecutionReadinessNode } from '../../shared/validation/executionReadiness.ts';
 import { executionInputSignatures } from './executionIdentity.ts';
 import { buildInitialOutputs } from './executionInputs.ts';
 import type { ExecutionMediaSourceOptions } from './executionMediaSource.ts';
-import type { ExecutableNode } from './ExecutionScheduler.ts';
 import type { PersistedExecutionRecord } from './executionStore.ts';
 
-type Graph = Pick<PersistedExecutionRecord, 'nodes' | 'edges'>;
+export type RecoveryInputGraph = { nodes: ExecutionReadinessNode[]; edges: PersistedExecutionRecord['edges'] };
 
 /** Catalog hydration changes params and legacy bindings. Other input fields
  * can be compared directly with the persisted node even when the catalog is gone. */
-function stableNodeData(node: ExecutableNode) {
+function stableNodeData(node: ExecutionReadinessNode) {
   const { params, slotBindings, slotConflicts, ...data } = node.data ?? {};
   return { ...node, data };
 }
@@ -18,8 +18,8 @@ function stableNodeData(node: ExecutableNode) {
 /** Older Agent/Headless ledgers hash the selected prepared nodes, with the actual
  * external source outputs stored separately. Only those ledgers need this fallback. */
 export function compareLegacyExecutionInput(
-  graph: Graph, record: PersistedExecutionRecord, nodeId: string, savedSignature: string,
-  media: Omit<ExecutionMediaSourceOptions, 'workspaceId'>, catalogProjection?: Graph,
+  graph: RecoveryInputGraph, record: PersistedExecutionRecord, nodeId: string, savedSignature: string,
+  media: Omit<ExecutionMediaSourceOptions, 'workspaceId'>, catalogProjection?: RecoveryInputGraph,
 ): 'same' | 'changed' | 'unverified' | 'catalog-needed' {
   const selected = new Set([nodeId]);
   if (record.variables.executionInputSignatureScope === 'workspace'
@@ -34,7 +34,7 @@ export function compareLegacyExecutionInput(
   const rawParams = (raw.data?.params ?? {}) as Record<string, unknown>;
   const savedParams = (savedNode.data?.params ?? {}) as Record<string, unknown>;
   const effectiveParams = (node.data?.params ?? {}) as Record<string, unknown>;
-  if (typeof rawParams.model === 'string' && rawParams.model !== savedParams.model) return 'changed';
+  if (typeof rawParams.model === 'string' && rawParams.model.trim() !== String(savedParams.model ?? '').trim()) return 'changed';
   // For non-video operations, the old preparation only supplied missing model
   // and operation defaults. Video preparation also normalized explicit controls.
   if (raw.data?.materialType !== 'video') {
@@ -51,7 +51,7 @@ export function compareLegacyExecutionInput(
   if (canonicalJson(connections(savedEdges)) !== canonicalJson(connections(incoming))) return 'changed';
   if (executionInputSignatures({ nodes: [stableNodeData(savedNode)], edges: [] })[nodeId]
     !== executionInputSignatures({ nodes: [stableNodeData(node)], edges: [] })[nodeId]) return 'changed';
-  if (node.data?.inputBindingVersion === 1 && canonicalJson(node.data.slotBindings) !== canonicalJson(savedNode.data?.slotBindings)) return 'changed';
+  if (raw.data?.inputBindingVersion === 1 && canonicalJson(raw.data.slotBindings) !== canonicalJson(savedNode.data?.slotBindings)) return 'changed';
 
   const oldSources = Object.fromEntries(edges.filter(edge => Object.hasOwn(record.nodeOutputs, edge.source))
     .map(edge => [edge.source, record.nodeOutputs[edge.source]]));

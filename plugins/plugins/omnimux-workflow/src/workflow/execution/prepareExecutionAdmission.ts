@@ -18,16 +18,15 @@ export async function prepareExecutionAdmission<
   const identity = findRecoverableTasks ? {
     inputSignatures: executionInputSignatures(graph, selected.nodeIdSet),
     sourceIdentities: executionSourceIdentities(graph, selected.nodeIdSet),
-    rawGraph: { nodes: graph.nodes as ExecutableNode[], edges: graph.edges },
+    rawGraph: graph,
   } : undefined;
   let catalog: CapabilityCatalog | null = null;
   let prepared: typeof graph | undefined;
-  let legacyCatalogProjection: { nodes: ExecutableNode[]; edges: E[] } | undefined;
   function lookup() {
     try {
       return identity && findRecoverableTasks ? findRecoverableTasks({
         workspaceId, nodes: selected.nodes as ExecutableNode[], edges: selected.edges, ...identity,
-        legacyCatalogProjection,
+        legacyCatalogProjection: prepared,
       }) : {};
     } catch (error) {
       if (!(error instanceof UnverifiedLegacyTask)) throw error;
@@ -41,7 +40,6 @@ export async function prepareExecutionAdmission<
     catalog = await Promise.resolve().then(getCatalog).catch(() => null);
     if (catalog) {
       prepared = prepareExecutionSlotGraph(graph.nodes, graph.edges, catalog);
-      legacyCatalogProjection = { nodes: prepared.nodes as ExecutableNode[], edges: prepared.edges };
       recoveryTasks = lookup();
     }
   }
@@ -67,6 +65,6 @@ export async function prepareExecutionAdmission<
   return {
     subgraph, readiness,
     sourceGraph: { id: workspaceId, nodes: prepared.nodes, edges: prepared.edges.filter(edge => !Object.hasOwn(recoveryTasks, edge.target)) },
-    recovery: identity ? { ...identity, ...(legacyCatalogProjection ? { legacyCatalogProjection } : {}), recoveryTasks } : {},
+    recovery: identity ? { ...identity, ...(catalog ? { legacyCatalogProjection: prepared } : {}), recoveryTasks } : {},
   };
 }

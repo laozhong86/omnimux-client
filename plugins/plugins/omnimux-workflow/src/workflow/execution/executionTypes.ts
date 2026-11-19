@@ -11,6 +11,7 @@ import {
   type ExecutableNode,
 } from './ExecutionScheduler';
 import type { GenerationGateway } from '../seam/gateway';
+import type { RecoveryInputGraph } from './legacyExecutionInput.ts';
 export { executionInputSignatures, executionSourceIdentities } from './executionIdentity.ts';
 
 /** Periodic record sync interval while running (Gxgen: 5s DB sync). */
@@ -94,8 +95,8 @@ export interface CreateExecutionOptions {
   /** Raw graph intent captured before slot/catalog/source preparation. */
   inputSignatures?: Record<string, string>;
   /** Used only to compare old prepared-node ledgers whose external sources were stored separately. */
-  rawGraph?: Pick<CreateExecutionOptions, 'nodes' | 'edges'>;
-  legacyCatalogProjection?: Pick<CreateExecutionOptions, 'nodes' | 'edges'>;
+  rawGraph?: RecoveryInputGraph;
+  legacyCatalogProjection?: RecoveryInputGraph;
   sourceIdentities?: Record<string, Record<string, string>>;
   /** Host-internal accepted handles fixed during route admission. */
   recoveryTasks?: Record<string, import('../seam/gateway.ts').UpstreamTaskRef>;
