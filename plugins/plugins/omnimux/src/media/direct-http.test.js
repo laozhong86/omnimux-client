@@ -66,7 +66,7 @@ describe('Direct Media Generate HTTP Route', () => {
     assert.equal(res.json().error, 'method-not-allowed')
   })
 
-  it('reports the original 400 when the shared guard requires a prompt', async () => {
+  it('rejects empty prompt with 400', async () => {
     const { route } = fixture({
       executeImage: (req) => executeOmnimuxImage({
         ...req,

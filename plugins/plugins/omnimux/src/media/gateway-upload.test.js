@@ -387,9 +387,10 @@ describe('gateway-upload: end-to-end media integration', () => {
       if (url.endsWith('/files/upload/presign')) return new Response(null, { status: 501 })
       if (url.endsWith('/files/upload/stream')) {
         const category = init.body.get('upload_path')
+        assert.ok(category === 'photos' || category === 'audios')
         uploads.push(category)
         return Response.json({ data: {
-          file_url: hosted[category],
+          file_url: category === 'photos' ? hosted.photos : hosted.audios,
           expires_at: new Date(Date.now() + 15_000).toISOString(),
         } })
       }

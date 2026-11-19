@@ -111,7 +111,8 @@ async function isolatedPackage(run) {
   fs.cpSync(fileURLToPath(new URL('../../lib/', import.meta.url)), `${scratch}/lib`, { recursive: true })
   try { await run(scratch) } finally { fs.rmSync(scratch, { recursive: true, force: true }) }
 }
-test('#3272 each fixed package source changes fresh identity; already loaded factories remain stable', async () => {
+// Keep the original regression identity while also covering the added H3 source files.
+test('#3272 each of thirteen fixed package sources changes fresh identity; already loaded factories remain stable', async () => {
   await isolatedPackage(async scratch => {
     const url = pathToFileURL(`${scratch}/src/media/generation-mapping.js`).href
     const first = await import(`${url}?initial`), initial = first.createGenerationMapping(parsed())(candidate()).sourceVersion
